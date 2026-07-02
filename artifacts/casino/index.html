@@ -3461,54 +3461,74 @@ function leaveRLGame() {
 ============================================================ */
 let mmTimerInterval = null;
 let mmGameType = null;
+let mmOpponentListener = null; // Firebase listener ref for cleanup
 
 function startMatchmaking(gameType) {
   mmGameType = gameType;
   el('matchmaking-overlay').classList.add('show');
   let t2 = 10;
   el('mm-timer').textContent = t2;
+  let matched = false; // guard against double-start
+
+  // Countdown — when it hits 0 and no real player was found, start bot
   mmTimerInterval = setInterval(() => {
     t2--;
     el('mm-timer').textContent = t2;
-    if (t2 <= 0) { clearInterval(mmTimerInterval); startWithBot(gameType); }
+    if (t2 <= 0) {
+      clearInterval(mmTimerInterval);
+      if (!matched) { matched = true; startWithBot(gameType); }
+    }
   }, 1000);
 
-  // Try to find a real player
-  const mmRef2 = db.ref('matchmaking').push({
+  // Push own entry to the matchmaking queue
+  const myTs = Date.now();
+  db.ref('matchmaking').push({
     uid: currentUser.uid, name: playerData.name,
-    ranking: playerData.ranking||0, game: gameType, ts: Date.now()
-  });
-  mmRef = mmRef2;
+    ranking: playerData.ranking || 0, game: gameType, ts: myTs
+  }).then(ref => { mmRef = ref; });
 
-  // Look for opponent
-  db.ref('matchmaking').orderByChild('game').equalTo(gameType).once('value', snap => {
-    const players = [];
-    snap.forEach(s => { const d=s.val(); if(d.uid!==currentUser.uid) players.push({...d,key:s.key}); });
-    if (players.length) {
-      // Match found
-      const opp = players[0];
-      db.ref(`matchmaking/${opp.key}`).remove();
-      if (mmRef) { mmRef.remove(); mmRef=null; }
-      clearInterval(mmTimerInterval);
-      el('matchmaking-overlay').classList.remove('show');
-      // Start game vs real player
-      if (gameType==='blackjack') startBJSolo(true);
-      else startRLSolo(true);
+  // Listen continuously for any opponent who enters the queue
+  const oppQuery = db.ref('matchmaking').orderByChild('game').equalTo(gameType);
+  mmOpponentListener = oppQuery;
+  oppQuery.on('child_added', snap => {
+    if (matched) return;
+    const d = snap.val();
+    if (!d || d.uid === currentUser.uid) return; // skip own entry
+
+    // Ignore stale entries left over from disconnected sessions (older than 15 s)
+    if (Date.now() - (d.ts || 0) > 15000) {
+      db.ref(`matchmaking/${snap.key}`).remove();
+      return;
     }
+
+    // Real, fresh opponent found — match!
+    matched = true;
+    oppQuery.off();              // stop listening
+    mmOpponentListener = null;
+    db.ref(`matchmaking/${snap.key}`).remove();
+    if (mmRef) { mmRef.remove(); mmRef = null; }
+    clearInterval(mmTimerInterval);
+    el('matchmaking-overlay').classList.remove('show');
+    if (gameType === 'blackjack') startBJSolo(true);
+    else startRLSolo(true);
+    showNotif('success', 'Znaleziono przeciwnika!', 'Gra rankingowa rozpoczęta.');
   });
 }
 
 function startWithBot(gameType) {
+  // Detach the Firebase listener so it doesn't fire after bot start
+  if (mmOpponentListener) { mmOpponentListener.off(); mmOpponentListener = null; }
   el('matchmaking-overlay').classList.remove('show');
-  if (mmRef) { mmRef.remove(); mmRef=null; }
-  if (gameType==='blackjack') startBJSolo(true);
+  if (mmRef) { mmRef.remove(); mmRef = null; }
+  if (gameType === 'blackjack') startBJSolo(true);
   else startRLSolo(true);
-  showNotif('info','Grasz z botem','Nie znaleziono przeciwnika – grasz z botem rankingowym.');
+  showNotif('info', 'Grasz z botem', 'Nie znaleziono przeciwnika – grasz z botem rankingowym.');
 }
 
 function cancelMatchmaking() {
   clearInterval(mmTimerInterval);
-  if (mmRef) { mmRef.remove(); mmRef=null; }
+  if (mmOpponentListener) { mmOpponentListener.off(); mmOpponentListener = null; }
+  if (mmRef) { mmRef.remove(); mmRef = null; }
   el('matchmaking-overlay').classList.remove('show');
 }
 
