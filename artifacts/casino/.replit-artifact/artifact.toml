@@ -14,9 +14,8 @@ localPort = 22412
 run = "pnpm --filter @workspace/casino run dev"
 
 [services.production]
-build = [ "pnpm", "--filter", "@workspace/casino", "run", "build" ]
 serve = "static"
-publicDir = "artifacts/casino/dist/public"
+publicDir = "artifacts/casino"
 
 [[services.production.rewrites]]
 from = "/*"
