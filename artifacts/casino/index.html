@@ -2,7 +2,7 @@
 <html lang="pl">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Royal Casino</title>
 
   <!-- Firebase CDN (compat) -->
@@ -35,6 +35,9 @@
       --radius: 12px;
       --shadow: 0 4px 20px rgba(0,0,0,0.6);
       --shadow-gold: 0 0 20px rgba(212,160,23,0.4);
+      /* Safe area – JS updates these at runtime for Android */
+      --sat: 32px;
+      --sab: 16px;
     }
     html, body {
       height: 100%; width: 100%;
@@ -229,7 +232,7 @@
     }
     .lobby-header {
       background: linear-gradient(180deg, rgba(0,0,0,0.8) 0%, transparent 100%);
-      padding: 16px 20px;
+      padding: max(var(--sat), env(safe-area-inset-top, var(--sat))) 20px 16px;
       display: flex; align-items: center; justify-content: space-between;
       position: sticky; top: 0; z-index: 100; backdrop-filter: blur(10px);
     }
@@ -350,7 +353,7 @@
       position: sticky; bottom: 0;
       background: rgba(10,10,10,0.95); backdrop-filter: blur(10px);
       border-top: 1px solid var(--black4);
-      display: flex; padding: 8px 0 max(8px,env(safe-area-inset-bottom));
+      display: flex; padding: 8px 0 max(var(--sab), env(safe-area-inset-bottom, var(--sab)));
       z-index: 100;
     }
     .nav-item {
@@ -787,7 +790,7 @@
       background: var(--black);
     }
     .room-header {
-      padding: 16px; background: var(--black2); border-bottom: 1px solid var(--black4);
+      padding: max(var(--sat), env(safe-area-inset-top, var(--sat))) 16px 16px; background: var(--black2); border-bottom: 1px solid var(--black4);
       display: flex; align-items: center; gap: 14px;
     }
     .room-content { padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
@@ -1058,7 +1061,7 @@
        GENERAL LAYOUT HELPERS
     ============================================================ */
     .screen-header {
-      padding: 14px 16px; display: flex; align-items: center; gap: 12px;
+      padding: max(var(--sat), env(safe-area-inset-top, var(--sat))) 16px 14px; display: flex; align-items: center; gap: 12px;
       background: rgba(0,0,0,0.4); backdrop-filter: blur(10px);
       position: sticky; top: 0; z-index: 50;
       border-bottom: 1px solid var(--black4);
@@ -1900,6 +1903,44 @@
 'use strict';
 
 /* ============================================================
+   SAFE AREA – detect Android status bar height at runtime
+   env(safe-area-inset-top) returns 0 on most Android browsers;
+   we measure the actual offset and set CSS vars accordingly.
+============================================================ */
+(function applySafeArea() {
+  function update() {
+    // Probe CSS env() – works on iOS, returns 0 on most Android
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:fixed;top:env(safe-area-inset-top,0px);left:0;width:0;height:0;pointer-events:none;visibility:hidden;';
+    document.documentElement.appendChild(probe);
+    const envTop = parseInt(getComputedStyle(probe).top) || 0;
+    document.documentElement.removeChild(probe);
+
+    // On Android: if env() returned 0, estimate from window/screen diff
+    let safeTop = envTop;
+    if (!safeTop) {
+      // screen.height is physical pixels / devicePixelRatio ≈ CSS px
+      const barCss = (window.screen.height - window.screen.availHeight);
+      safeTop = Math.max(0, Math.min(barCss, 60)); // clamp to sensible range
+    }
+    safeTop = Math.max(safeTop, 28); // always at least 28 px on mobile
+
+    const probeB = document.createElement('div');
+    probeB.style.cssText = 'position:fixed;bottom:env(safe-area-inset-bottom,0px);left:0;width:0;height:0;pointer-events:none;visibility:hidden;';
+    document.documentElement.appendChild(probeB);
+    const envBot = parseInt(getComputedStyle(probeB).bottom) || 0;
+    document.documentElement.removeChild(probeB);
+    const safeBot = Math.max(envBot, 8);
+
+    document.documentElement.style.setProperty('--sat', safeTop + 'px');
+    document.documentElement.style.setProperty('--sab', safeBot + 'px');
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', update);
+  else update();
+  window.addEventListener('resize', update);
+})();
+
+/* ============================================================
    FIREBASE INITIALIZATION
 ============================================================ */
 const firebaseConfig = {
@@ -1948,6 +1989,9 @@ let roomListeners = [];
 let mmTimer = null;
 let mmRef = null;
 let mmGame = null;
+
+// Friend requests received via /friendRequests/{uid}/ (top-level path)
+let incomingRequests = {};
 
 /* ============================================================
    SECURITY – HTML SANITIZATION
@@ -2339,10 +2383,11 @@ const DEFAULT_PLAYER = {
 };
 
 async function initPlayerData(user, name) {
-  const data = { ...DEFAULT_PLAYER, name, email: user.email, uid: user.uid, createdAt: Date.now() };
+  const nameLower = name.toLowerCase();
+  const data = { ...DEFAULT_PLAYER, name, nameLower, email: user.email, uid: user.uid, createdAt: Date.now() };
   await db.ref(`users/${user.uid}`).set(data);
   // Register username index for search
-  await db.ref(`usernames/${name.toLowerCase().replace(/\s+/g,'_')}`).set(user.uid);
+  await db.ref(`usernames/${nameLower.replace(/\s+/g,'_')}`).set(user.uid);
 }
 
 function listenToPlayerData(uid) {
@@ -2355,6 +2400,44 @@ function listenToPlayerData(uid) {
     checkDailyBonus();
   });
   listeners.push({ ref, off });
+
+  // Listen for incoming friend requests at top-level /friendRequests/{uid}/
+  // Any authenticated user can WRITE here; only this user reads their own.
+  const frRef = db.ref(`friendRequests/${uid}`);
+  const frOffAdded = frRef.on('child_added', snap => {
+    const d = snap.val();
+    if (!d) return;
+
+    if (d.type === 'accepted') {
+      // Our outgoing request was accepted → auto-add friend, clean up
+      const friendUid = d.from;
+      const friendName = d.name;
+      db.ref(`users/${uid}/friends/${friendUid}`).set({ name: friendName, uid: friendUid, since: d.since || Date.now() });
+      db.ref(`users/${uid}/sentRequests/${d.origReqId}`).remove();
+      snap.ref.remove(); // remove the accepted notification
+      showNotif('success', 'Zaproszenie zaakceptowane', `${friendName} jest teraz Twoim znajomym!`);
+      return;
+    }
+
+    incomingRequests[snap.key] = { ...d, reqId: snap.key };
+    updateFriendBadge();
+    if (currentScreen === 'friends') refreshFriends();
+  });
+
+  const frOffRemoved = frRef.on('child_removed', snap => {
+    delete incomingRequests[snap.key];
+    updateFriendBadge();
+    if (currentScreen === 'friends') refreshFriends();
+  });
+
+  listeners.push({ ref: frRef, off: frOffAdded });
+  listeners.push({ ref: frRef, off: frOffRemoved });
+}
+
+function updateFriendBadge() {
+  const cnt = Object.keys(incomingRequests).filter(k => incomingRequests[k].type !== 'accepted').length;
+  const badge = el('friend-req-badge');
+  if (badge) { badge.textContent = cnt; badge.classList.toggle('hidden', cnt === 0); }
 }
 
 async function updatePlayerData(updates) {
@@ -2368,10 +2451,11 @@ async function updateNestedData(path, updates) {
 }
 
 function detachAllListeners() {
-  listeners.forEach(({ ref, off }) => ref.off('value', off));
+  listeners.forEach(({ ref, off }) => { try { ref.off('value', off); ref.off('child_added', off); ref.off('child_removed', off); } catch(e){} });
   listeners = [];
-  roomListeners.forEach(({ ref, off }) => ref.off('value', off));
+  roomListeners.forEach(({ ref, off }) => { try { ref.off('value', off); } catch(e){} });
   roomListeners = [];
+  incomingRequests = {};
 }
 
 /* ============================================================
@@ -2549,12 +2633,7 @@ function formatNum(n) {
 function refreshLobby() {
   updateUI();
   checkDailyBonus();
-  // Pending friend requests count
-  if (playerData?.friendRequests) {
-    const cnt = Object.keys(playerData.friendRequests).filter(k => playerData.friendRequests[k].status==='incoming').length;
-    const badge = el('friend-req-badge');
-    if (badge) { badge.textContent = cnt; badge.classList.toggle('hidden', cnt === 0); }
-  }
+  updateFriendBadge();
 }
 
 function renderProfile() {
@@ -2666,15 +2745,28 @@ async function searchPlayer() {
   const resultsEl = el('search-results');
   resultsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div></div>';
   try {
-    const snap = await db.ref('users').orderByChild('name').startAt(query).endAt(query+'\uf8ff').limitToFirst(10).once('value');
+    let snap;
+    try {
+      // Try indexed query first
+      snap = await db.ref('users').orderByChild('nameLower').startAt(query).endAt(query+'\uf8ff').limitToFirst(20).once('value');
+    } catch(e) {
+      // Fallback: scan all users client-side (works without index)
+      snap = await db.ref('users').limitToFirst(200).once('value');
+    }
     const users = [];
-    snap.forEach(s => { if(s.val().name && s.key !== currentUser.uid) users.push(s.val()); });
+    snap.forEach(s => {
+      const d = s.val();
+      if (!d || s.key === currentUser.uid) return;
+      const nameLower = (d.nameLower || (d.name||'').toLowerCase());
+      if (nameLower.includes(query)) users.push(d);
+    });
     if (!users.length) { resultsEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">Nie znaleziono gracza</div></div>'; return; }
     const friends = playerData?.friends || {};
-    const sent = playerData?.friendRequests || {};
-    resultsEl.innerHTML = users.map(u => {
+    const sent = playerData?.sentRequests || {};
+    resultsEl.innerHTML = users.slice(0,10).map(u => {
       const isFriend = !!friends[u.uid];
-      const isPending = Object.values(sent).some(r => r.uid===u.uid);
+      // Check if we already sent a request (key format: {myUid}_{theirUid})
+      const isPending = !!sent[`${currentUser.uid}_${u.uid}`];
       const lg = getLeague(u.ranking||0);
       return `<div class="friend-item">
         <div class="friend-avatar">${esc((u.name||'?').charAt(0).toUpperCase())}<div class="online-dot ${u.online?'online':'offline'}"></div></div>
@@ -2687,48 +2779,72 @@ async function searchPlayer() {
         </div>
       </div>`;
     }).join('');
-  } catch(e) { console.warn(e); }
+  } catch(e) {
+    resultsEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">Błąd — sprawdź reguły Firebase</div></div>';
+    console.warn('Search error:', e);
+  }
 }
 
 async function sendFriendRequest(uid, name) {
-  const reqId = `${currentUser.uid}_${uid}`;
-  await db.ref(`users/${uid}/friendRequests/${reqId}`).set({ uid: currentUser.uid, name: playerData.name, status:'incoming', ts: Date.now() });
-  await db.ref(`users/${currentUser.uid}/friendRequests/${reqId}`).set({ uid, name, status:'outgoing', ts: Date.now() });
-  showNotif('info','Zaproszenie wysłane',`Zaprosiłeś ${name} do znajomych.`);
-  searchPlayer();
+  try {
+    const reqId = `${currentUser.uid}_${uid}`;
+    // Write to TOP-LEVEL /friendRequests/{targetUid}/ — any auth user can write here
+    // (rules: friendRequests/$uid .write: auth != null)
+    await db.ref(`friendRequests/${uid}/${reqId}`).set({
+      from: currentUser.uid, name: playerData.name, ts: Date.now()
+    });
+    // Track outgoing in own user node (own path, always allowed)
+    await db.ref(`users/${currentUser.uid}/sentRequests/${reqId}`).set({ to: uid, name, ts: Date.now() });
+    showNotif('info','Zaproszenie wysłane',`Zaprosiłeś ${name} do znajomych.`);
+    searchPlayer();
+  } catch(e) {
+    showNotif('error','Błąd',`Sprawdź reguły Firebase: ${e.code||e.message}`);
+  }
 }
 
-async function acceptFriend(reqId, uid, name) {
-  await db.ref(`users/${currentUser.uid}/friends/${uid}`).set({ name, uid, since: Date.now() });
-  await db.ref(`users/${uid}/friends/${currentUser.uid}`).set({ name: playerData.name, uid: currentUser.uid, since: Date.now() });
-  await db.ref(`users/${currentUser.uid}/friendRequests/${reqId}`).remove();
-  await db.ref(`users/${uid}/friendRequests/${reqId}`).remove();
-  showNotif('info','Znajomy dodany',`${name} jest teraz Twoim znajomym!`);
+async function acceptFriend(reqId, senderUid, senderName) {
+  try {
+    const since = Date.now();
+    // Add to OWN friends list (own path, always allowed)
+    await db.ref(`users/${currentUser.uid}/friends/${senderUid}`).set({ name: senderName, uid: senderUid, since });
+    // Notify sender via /friendRequests/{senderUid}/ so they can auto-add us back
+    await db.ref(`friendRequests/${senderUid}/accepted_${reqId}`).set({
+      type: 'accepted', from: currentUser.uid, name: playerData.name, since, origReqId: reqId
+    });
+    // Remove own incoming request
+    await db.ref(`friendRequests/${currentUser.uid}/${reqId}`).remove();
+    showNotif('success','Znajomy dodany',`${senderName} jest teraz Twoim znajomym!`);
+  } catch(e) {
+    showNotif('error','Błąd',`Sprawdź reguły Firebase: ${e.code||e.message}`);
+  }
 }
 
-async function declineFriend(reqId, uid) {
-  await db.ref(`users/${currentUser.uid}/friendRequests/${reqId}`).remove();
-  await db.ref(`users/${uid}/friendRequests/${reqId}`).remove();
+async function declineFriend(reqId) {
+  await db.ref(`friendRequests/${currentUser.uid}/${reqId}`).remove();
 }
 
 async function removeFriend(uid, name) {
   await db.ref(`users/${currentUser.uid}/friends/${uid}`).remove();
-  await db.ref(`users/${uid}/friends/${currentUser.uid}`).remove();
   showNotif('info','Usunięto znajomego',`${name} usunięty z listy.`);
 }
 
 async function inviteFriendToRoom(uid, name) {
   if (!currentRoom) { showNotif('info','Brak pokoju','Najpierw dołącz do pokoju.'); return; }
-  await db.ref(`users/${uid}/roomInvites/${currentRoom.id}`).set({ roomId: currentRoom.id, code: currentRoom.code, hostName: playerData.name, game: currentRoom.game, ts: Date.now() });
-  showNotif('info','Zaproszenie wysłane',`Zaproszono ${name} do pokoju.`);
+  try {
+    await db.ref(`friendRequests/${uid}/invite_${currentRoom.id}`).set({
+      type: 'roomInvite', roomId: currentRoom.id, code: currentRoom.code,
+      hostName: playerData.name, game: currentRoom.game, ts: Date.now()
+    });
+    showNotif('info','Zaproszenie wysłane',`Zaproszono ${name} do pokoju.`);
+  } catch(e) { showNotif('error','Błąd',e.message); }
 }
 
 function refreshFriends() {
   if (!playerData) return;
   const friends = playerData.friends || {};
-  const requests = playerData.friendRequests || {};
-  // Pending
-  const incoming = Object.entries(requests).filter(([,v]) => v.status==='incoming');
+
+  // Pending incoming requests (from /friendRequests/ listener)
+  const incoming = Object.entries(incomingRequests).filter(([,v]) => !v.type || v.type === 'request');
   const pendingSection = el('pending-section');
   if (incoming.length) {
     pendingSection.classList.remove('hidden');
@@ -2737,14 +2853,15 @@ function refreshFriends() {
         <div class="friend-avatar">${esc((r.name||'?').charAt(0).toUpperCase())}</div>
         <div class="friend-info"><div class="friend-name">${esc(r.name)}</div><div class="friend-status">Zaproszenie do znajomych</div></div>
         <div class="friend-actions">
-          <button class="btn-green btn-xs" onclick="acceptFriend('${esc(id)}','${esc(r.uid)}','${esc(r.name)}')">✓</button>
-          <button class="btn-danger btn-xs" onclick="declineFriend('${esc(id)}','${esc(r.uid)}')">✗</button>
+          <button class="btn-green btn-xs" onclick="acceptFriend('${esc(id)}','${esc(r.from)}','${esc(r.name)}')">✓</button>
+          <button class="btn-danger btn-xs" onclick="declineFriend('${esc(id)}')">✗</button>
         </div>
       </div>
     `).join('');
   } else {
     pendingSection.classList.add('hidden');
   }
+
   // Friends list
   const friendsList = Object.values(friends);
   const friendsEl = el('friends-list');
@@ -2752,7 +2869,6 @@ function refreshFriends() {
     friendsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">👥</div><div class="empty-state-text">Brak znajomych</div></div>';
     return;
   }
-  // Fetch online status
   const promises = friendsList.map(f => db.ref(`users/${f.uid}/online`).once('value'));
   Promise.all(promises).then(snaps => {
     friendsEl.innerHTML = friendsList.map((f,i) => {
@@ -3766,7 +3882,10 @@ async function refreshPublicRooms(game, listId) {
         <div class="room-item-players">${Array(maxP).fill(0).map((_,i)=>`<div class="player-dot ${i<pCount?'':'empty'}"></div>`).join('')}</div>
       </div>`;
     }).join('');
-  } catch(e) { console.warn(e); }
+  } catch(e) {
+    el(listId).innerHTML = `<div class="empty-state"><div class="empty-state-text">Błąd — zaktualizuj reguły Firebase (${e.code||e.message})</div></div>`;
+    console.warn('Rooms load error:', e);
+  }
 }
 
 function showBJPublicRooms() { refreshBJRooms(); }
