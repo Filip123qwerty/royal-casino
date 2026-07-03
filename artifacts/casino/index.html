@@ -2799,7 +2799,7 @@ async function sendFriendRequest(uid, name) {
     // Write to TOP-LEVEL /friendRequests/{targetUid}/ — any auth user can write here
     // (rules: friendRequests/$uid .write: auth != null)
     await db.ref(`friendRequests/${uid}/${reqId}`).set({
-      from: currentUser.uid, name: playerData.name, ts: Date.now()
+      from: currentUser.uid, name: playerData?.name || 'Gracz', ts: Date.now()
     });
     // Track outgoing in own user node (own path, always allowed)
     await db.ref(`users/${currentUser.uid}/sentRequests/${reqId}`).set({ to: uid, name, ts: Date.now() });
@@ -2817,7 +2817,7 @@ async function acceptFriend(reqId, senderUid, senderName) {
     await db.ref(`users/${currentUser.uid}/friends/${senderUid}`).set({ name: senderName, uid: senderUid, since });
     // Notify sender via /friendRequests/{senderUid}/ so they can auto-add us back
     await db.ref(`friendRequests/${senderUid}/accepted_${reqId}`).set({
-      type: 'accepted', from: currentUser.uid, name: playerData.name, since, origReqId: reqId
+      type: 'accepted', from: currentUser.uid, name: playerData?.name || 'Gracz', since, origReqId: reqId
     });
     // Remove own incoming request
     await db.ref(`friendRequests/${currentUser.uid}/${reqId}`).remove();
@@ -2841,7 +2841,7 @@ async function inviteFriendToRoom(uid, name) {
   try {
     await db.ref(`friendRequests/${uid}/invite_${currentRoom.id}`).set({
       type: 'roomInvite', roomId: currentRoom.id, code: currentRoom.code,
-      hostName: playerData.name, game: currentRoom.game, ts: Date.now()
+      hostName: playerData?.name || 'Gracz', game: currentRoom.game, ts: Date.now()
     });
     showNotif('info','Zaproszenie wysłane',`Zaproszono ${name} do pokoju.`);
   } catch(e) { showNotif('error','Błąd',e.message); }
@@ -3588,6 +3588,8 @@ let mmGameType = null;
 let mmOpponentListener = null; // Firebase listener ref for cleanup
 
 function startMatchmaking(gameType) {
+  if (!currentUser) return;
+  const myName = playerData?.name || currentUser.email?.split('@')[0] || 'Gracz';
   mmGameType = gameType;
   el('matchmaking-overlay').classList.add('show');
   let t2 = 10;
@@ -3607,8 +3609,8 @@ function startMatchmaking(gameType) {
   // Push own entry to the matchmaking queue
   const myTs = Date.now();
   db.ref('matchmaking').push({
-    uid: currentUser.uid, name: playerData.name,
-    ranking: playerData.ranking || 0, game: gameType, ts: myTs
+    uid: currentUser.uid, name: myName,
+    ranking: playerData?.ranking || 0, game: gameType, ts: myTs
   }).then(ref => { mmRef = ref; });
 
   // Listen continuously for any opponent who enters the queue
@@ -3672,6 +3674,8 @@ function generateCode() {
 }
 
 async function doCreateRoom() {
+  if (!currentUser) return;
+  const myName = playerData?.name || currentUser.email?.split('@')[0] || 'Gracz';
   const name = el('room-name-input').value.trim() || 'Mój pokój';
   const maxPlayers = parseInt(el('room-max-players').value)||4;
   const type = el('room-type-input').value;
@@ -3680,8 +3684,8 @@ async function doCreateRoom() {
   const roomData = {
     name, maxPlayers, type, code, game,
     hostUid: currentUser.uid,
-    hostName: playerData.name,
-    players: { [currentUser.uid]: { name: playerData.name, uid: currentUser.uid, ready:false } },
+    hostName: myName,
+    players: { [currentUser.uid]: { name: myName, uid: currentUser.uid, ready:false } },
     status: 'waiting',
     createdAt: Date.now(),
   };
@@ -3719,7 +3723,8 @@ async function doJoinByCode() {
       el('join-code-error').textContent = 'Pokój jest pełny.';
       el('join-code-error').classList.remove('hidden'); return;
     }
-    await db.ref(`rooms/${roomId}/players/${currentUser.uid}`).set({ name: playerData.name, uid: currentUser.uid, ready:false });
+    const myName2 = playerData?.name || currentUser.email?.split('@')[0] || 'Gracz';
+    await db.ref(`rooms/${roomId}/players/${currentUser.uid}`).set({ name: myName2, uid: currentUser.uid, ready:false });
     currentRoom = { id: roomId, ...roomData };
     closeModal('modal-joincode');
     joinRoomScreen(roomId, roomData.game);
@@ -3736,7 +3741,8 @@ async function joinRoomDirectly(roomId, game) {
   if (roomData.status !== 'waiting') { showNotif('info','Błąd','Gra już trwa.'); return; }
   const pCount = Object.keys(roomData.players||{}).length;
   if (pCount >= roomData.maxPlayers) { showNotif('info','Pełny','Pokój jest pełny.'); return; }
-  await db.ref(`rooms/${roomId}/players/${currentUser.uid}`).set({ name: playerData.name, uid: currentUser.uid, ready:false });
+  const myName3 = playerData?.name || currentUser.email?.split('@')[0] || 'Gracz';
+  await db.ref(`rooms/${roomId}/players/${currentUser.uid}`).set({ name: myName3, uid: currentUser.uid, ready:false });
   currentRoom = { id: roomId, ...roomData };
   joinRoomScreen(roomId, game);
 }
@@ -3858,7 +3864,7 @@ async function sendChatMsg() {
   const input = el('room-chat-input');
   const text = input.value.trim();
   if (!text) return;
-  await db.ref(`rooms/${currentRoom.id}/chat`).push({ name: playerData.name, text, ts: Date.now() });
+  await db.ref(`rooms/${currentRoom.id}/chat`).push({ name: playerData?.name || 'Gracz', text, ts: Date.now() });
   input.value='';
 }
 
@@ -3916,12 +3922,25 @@ auth.onAuthStateChanged(user => {
   if (user) {
     currentUser = user;
     setupPresence();
-    listenToPlayerData(user.uid);
-    // Ensure player data exists
-    db.ref(`users/${user.uid}`).once('value', snap => {
-      if (!snap.exists()) initPlayerData(user, user.email.split('@')[0]);
+    // Load player data BEFORE showing lobby to prevent undefined-name errors
+    db.ref(`users/${user.uid}`).once('value').then(async snap => {
+      if (snap.exists()) {
+        playerData = snap.val();
+      } else {
+        // New user — create profile, wait for it to finish
+        const name = (user.displayName || user.email.split('@')[0] || 'Gracz').slice(0,24);
+        await initPlayerData(user, name);
+        const snap2 = await db.ref(`users/${user.uid}`).once('value');
+        if (snap2.exists()) playerData = snap2.val();
+      }
+      listenToPlayerData(user.uid); // attach real-time listener
+      updateUI();
+      showScreen('lobby');
+    }).catch(e => {
+      console.warn('Player data load failed:', e);
+      listenToPlayerData(user.uid);
+      showScreen('lobby');
     });
-    setTimeout(() => showScreen('lobby'), 600);
   } else {
     currentUser = null;
     playerData = null;
