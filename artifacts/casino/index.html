@@ -2409,13 +2409,21 @@ function listenToPlayerData(uid) {
     if (!d) return;
 
     if (d.type === 'accepted') {
-      // Our outgoing request was accepted → auto-add friend, clean up
-      const friendUid = d.from;
-      const friendName = d.name;
-      db.ref(`users/${uid}/friends/${friendUid}`).set({ name: friendName, uid: friendUid, since: d.since || Date.now() });
-      db.ref(`users/${uid}/sentRequests/${d.origReqId}`).remove();
-      snap.ref.remove(); // remove the accepted notification
-      showNotif('success', 'Zaproszenie zaakceptowane', `${friendName} jest teraz Twoim znajomym!`);
+      // Validate: we must have an outgoing sentRequest whose .to === d.from
+      // This prevents forged acceptance events from arbitrary authenticated users
+      db.ref(`users/${uid}/sentRequests/${d.origReqId}`).once('value').then(sentSnap => {
+        if (!sentSnap.exists() || sentSnap.val().to !== d.from) {
+          // No matching outgoing request → forged event, discard silently
+          snap.ref.remove();
+          return;
+        }
+        const friendUid = d.from;
+        const friendName = d.name;
+        db.ref(`users/${uid}/friends/${friendUid}`).set({ name: friendName, uid: friendUid, since: d.since || Date.now() });
+        sentSnap.ref.remove();
+        snap.ref.remove();
+        showNotif('success', 'Zaproszenie zaakceptowane', `${friendName} jest teraz Twoim znajomym!`);
+      }).catch(() => { snap.ref.remove(); });
       return;
     }
 
