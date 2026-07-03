@@ -1,0 +1,3 @@
+- [Casino friend-request architecture](casino-friend-requests.md) — requests go to top-level /friendRequests/{uid}/ so any auth user can write without cross-user /users/ writes
+- [Casino safe area CSS](casino-safe-area.md) — uses --sat/--sab CSS vars set by JS IIFE; env(safe-area-inset-top) returns 0 on Android, so JS probes screen diff as fallback
+- [Casino Firebase rules](casino-firebase-rules.md) — required minimum rules for all multiplayer features to work
